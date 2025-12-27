@@ -4,9 +4,6 @@
 #include <HTTPClient.h>
 #include "esp_camera.h"
 
-// This is the code for the ESP32-CAM node, modified to use FreeRTOS
-// to prevent blocking operations from making the web server unresponsive.
-
 // Pin definition for AI-THINKER board
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
@@ -30,72 +27,58 @@ const char* ssid = "BatuKhan";
 const char* password = "momoygemoy";
 
 // --- Gateway Details ---
-const char* gatewayAddress = "http://esp32gate/register"; 
+// IMPORTANT: Change this to the hostname or IP address of your main ESP32 gateway
+const char* gatewayAddress = "http://esp32gate.local/register"; 
 
 WebServer server(80);
 
 // State for advertising to gateway
 bool isRegistered = false;
-
-// Task handles
-TaskHandle_t httpServerTaskHandle = NULL;
-TaskHandle_t advertiseTaskHandle = NULL;
+unsigned long lastAdvertTime = 0;
+const long advertIntervalUnregistered = 5000; // 5 seconds
+const long advertIntervalRegistered = 15000;   // 15 seconds
 
 void advertiseDevice() {
   if (WiFi.status() != WL_CONNECTED) {
     return;
   }
 
-  HTTPClient http;
-  http.begin(gatewayAddress);
-  http.addHeader("Content-Type", "application/json");
+  unsigned long currentMillis = millis();
+  long currentInterval = isRegistered ? advertIntervalRegistered : advertIntervalUnregistered;
 
-  String ip = WiFi.localIP().toString();
-  String mac = WiFi.macAddress();
-  String json = "{\"ip\":\"" + ip + "\",\"mac\":\"" + mac + "\"}";
+  if (currentMillis - lastAdvertTime >= currentInterval) {
+    lastAdvertTime = currentMillis;
 
-  if (isRegistered) {
-    Serial.println("Re-advertising device to gateway...");
-  } else {
-    Serial.println("Advertising device to gateway...");
-  }
+    HTTPClient http;
+    http.begin(gatewayAddress);
+    http.addHeader("Content-Type", "application/json");
 
-  int httpResponseCode = http.POST(json);
+    String ip = WiFi.localIP().toString();
+    String mac = WiFi.macAddress();
+    String json = "{\"ip\":\"" + ip + "\",\"mac\":\"" + mac + "\"}";
 
-  if (httpResponseCode == 200) {
-    if (!isRegistered) {
-      Serial.println("Device successfully registered with gateway!");
-      isRegistered = true;
+    if (isRegistered) {
+      Serial.println("Re-advertising device to gateway (15s interval)...");
     } else {
-      Serial.println("Device re-advertised successfully.");
+      Serial.println("Advertising device to gateway (5s interval)...");
     }
-  } else {
-    Serial.print("Gateway advertising failed, error: ");
-    Serial.println(httpResponseCode);
-  }
-  http.end();
-}
 
-void advertiseTask(void *pvParameters) {
-  Serial.println("Advertise task started");
-  const TickType_t advertIntervalUnregistered = pdMS_TO_TICKS(5000);
-  const TickType_t advertIntervalRegistered = pdMS_TO_TICKS(15000);
+    int httpResponseCode = http.POST(json);
 
-  for (;;) {
-    TickType_t delayTime = isRegistered ? advertIntervalRegistered : advertIntervalUnregistered;
-    advertiseDevice();
-    vTaskDelay(delayTime);
-  }
-}
-
-void httpServerTask(void *pvParameters) {
-    Serial.println("HTTP server task started");
-    for (;;) {
-        server.handleClient();
-        vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to yield to other tasks
+    if (httpResponseCode == 200) {
+      if (!isRegistered) {
+        Serial.println("Device successfully registered with gateway!");
+        isRegistered = true;
+      } else {
+        Serial.println("Device re-advertised successfully.");
+      }
+    } else {
+      Serial.print("Gateway advertising failed, error: ");
+      Serial.println(httpResponseCode);
     }
+    http.end();
+  }
 }
-
 
 void handleGetInfo() {
   String ip = WiFi.localIP().toString();
@@ -111,9 +94,16 @@ void handleHello() {
 void handleTakePhoto() {
   camera_fb_t * fb = NULL;
 
+  // flush camera buffer
+  for (int i = 0; i < 3; i++) {
+    fb = esp_camera_fb_get();
+    if (fb) {
+      esp_camera_fb_return(fb);
+    }
+  }
+
   fb = esp_camera_fb_get();
   if (!fb) {
-    Serial.println("Failed to capture photo");
     server.send(500, "text/plain", "Failed to capture photo");
     return;
   }
@@ -124,12 +114,10 @@ void handleTakePhoto() {
   server.sendContent((const char *)fb->buf, fb->len);
 
   esp_camera_fb_return(fb);
-  fb = NULL;
 }
 
 void setup() {
   Serial.begin(115200);
-
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
@@ -162,48 +150,26 @@ void setup() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   
-  config.frame_size = FRAMESIZE_UXGA;
-  config.jpeg_quality = 12; // Lower quality for faster capture
-  config.fb_count = 1;
+  // High quality settings
+  config.frame_size = FRAMESIZE_UXGA; // 1600x1200
+  config.jpeg_quality = 10;
+  config.fb_count = 2;
 
   // Camera init
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
-    ESP.restart();
+    return;
   }
-
-  sensor_t * s = esp_camera_sensor_get();
-  // Using a smaller frame size is more reliable.
-  s->set_framesize(s, FRAMESIZE_SVGA); // 800x600
 
   server.on("/getinfo", handleGetInfo);
   server.on("/hello", handleHello);
   server.on("/takephoto", handleTakePhoto);
   server.begin();
   Serial.println("HTTP server started");
-
-  // Create RTOS tasks and pin them to core 1
-  xTaskCreatePinnedToCore(
-      httpServerTask,
-      "HTTPServer",
-      10000,
-      NULL,
-      1,
-      &httpServerTaskHandle,
-      1);
-
-  xTaskCreatePinnedToCore(
-      advertiseTask,
-      "Advertise",
-      5000,
-      NULL,
-      1,
-      &advertiseTaskHandle,
-      1);
 }
 
 void loop() {
-  // The default Arduino loop task is no longer needed.
-  vTaskDelete(NULL);
+  server.handleClient();
+  advertiseDevice();
 }
