@@ -27,16 +27,17 @@ const char* ssid = "BatuKhan";
 const char* password = "momoygemoy";
 
 // --- Gateway Details ---
-// IMPORTANT: Change this to the hostname or IP address of your main ESP32 gateway
-const char* gatewayAddress = "http://esp32gate.local/register"; 
+const char* gatewayAddress = "http://esp32gate/register";
+const char* gatewayUploadUrl = "http://esp32gate/upload-image";
 
 WebServer server(80);
 
-// State for advertising to gateway
+// --- State Management ---
 bool isRegistered = false;
 unsigned long lastAdvertTime = 0;
 const long advertIntervalUnregistered = 5000; // 5 seconds
-const long advertIntervalRegistered = 30000;   // 15 seconds
+const long advertIntervalRegistered = 30000;   // 30 seconds
+volatile bool takeAndSendPhoto = false; // Flag to trigger async photo capture and send
 
 void advertiseDevice() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -58,9 +59,9 @@ void advertiseDevice() {
     String json = "{\"ip\":\"" + ip + "\",\"mac\":\"" + mac + "\"}";
 
     if (isRegistered) {
-      Serial.println("Re-advertising device to gateway (15s interval)...");
+      Serial.println("Re-advertising device to gateway...");
     } else {
-      Serial.println("Advertising device to gateway (5s interval)...");
+      Serial.println("Advertising device to gateway...");
     }
 
     int httpResponseCode = http.POST(json);
@@ -80,6 +81,45 @@ void advertiseDevice() {
   }
 }
 
+// This function now runs from the main loop when triggered
+void captureAndPushImage() {
+  if (!takeAndSendPhoto) {
+    return;
+  }
+  
+  takeAndSendPhoto = false; // Reset flag
+  Serial.println("Starting asynchronous image capture and upload...");
+
+  camera_fb_t * fb = NULL;
+  for(uint8_t i = 0; i < 3; i++) {
+    fb = esp_camera_fb_get();
+    esp_camera_fb_return(fb);
+  }
+
+  fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Failed to capture photo");
+    return;
+  }
+
+  HTTPClient http;
+  http.begin(gatewayUploadUrl);
+  http.addHeader("Content-Type", "image/jpeg");
+
+  Serial.printf("Pushing image to gateway, size: %zu bytes\n", fb->len);
+  int httpResponseCode = http.POST(fb->buf, fb->len);
+
+  if (httpResponseCode == 200) {
+    Serial.println("Image uploaded successfully.");
+  } else {
+    Serial.print("Image upload failed, error: ");
+    Serial.println(httpResponseCode);
+  }
+
+  http.end();
+  esp_camera_fb_return(fb);
+}
+
 void handleGetInfo() {
   String ip = WiFi.localIP().toString();
   String mac = WiFi.macAddress();
@@ -91,29 +131,11 @@ void handleHello() {
   server.send(200, "text/plain", "hello world");
 }
 
-void handleTakePhoto() {
-  camera_fb_t * fb = NULL;
-
-  // flush camera buffer
-  for (int i = 0; i < 3; i++) {
-    fb = esp_camera_fb_get();
-    if (fb) {
-      esp_camera_fb_return(fb);
-    }
-  }
-
-  fb = esp_camera_fb_get();
-  if (!fb) {
-    server.send(500, "text/plain", "Failed to capture photo");
-    return;
-  }
-
-  server.setContentLength(fb->len);
-  server.sendHeader("Content-Type", "image/jpeg");
-  server.sendHeader("Content-Disposition", "attachment; filename=picture.jpeg");
-  server.sendContent((const char *)fb->buf, fb->len);
-
-  esp_camera_fb_return(fb);
+// This handler just sets a flag and returns immediately
+void handleTriggerPhoto() {
+  server.send(202, "text/plain", "Accepted: Photo capture triggered.");
+  takeAndSendPhoto = true;
+  Serial.println("Received trigger request. Will capture and send photo shortly.");
 }
 
 void setup() {
@@ -150,12 +172,10 @@ void setup() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   
-  // High quality settings
-  config.frame_size = FRAMESIZE_UXGA; // 1600x1200
+  config.frame_size = FRAMESIZE_UXGA;
   config.jpeg_quality = 10;
   config.fb_count = 2;
 
-  // Camera init
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
@@ -164,7 +184,7 @@ void setup() {
 
   server.on("/getinfo", handleGetInfo);
   server.on("/hello", handleHello);
-  server.on("/takephoto", handleTakePhoto);
+  server.on("/trigger-photo", handleTriggerPhoto); // Changed from /takephoto
   server.begin();
   Serial.println("HTTP server started");
 }
@@ -172,4 +192,5 @@ void setup() {
 void loop() {
   server.handleClient();
   advertiseDevice();
+  captureAndPushImage(); // Check if we need to send a photo
 }
