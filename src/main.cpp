@@ -36,7 +36,7 @@ WebServer server(80);
 bool isRegistered = false;
 unsigned long lastAdvertTime = 0;
 const long advertIntervalUnregistered = 5000; // 5 seconds
-const long advertIntervalRegistered = 15000;   // 15 seconds
+const long advertIntervalRegistered = 30000;   // 15 seconds
 
 void advertiseDevice() {
   if (WiFi.status() != WL_CONNECTED) {
