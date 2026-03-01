@@ -27,8 +27,15 @@ const char* ssid = "BatuKhan";
 const char* password = "momoygemoy";
 
 // --- Gateway Details ---
-const char* gatewayAddress = "http://esp32gate/register";
-const char* gatewayUploadUrl = "http://esp32gate/upload-image";
+// const char* gatewayAddress = "http://esp32gate.local/register";
+// const char* gatewayUploadUrl = "http://esp32gate.local:3000/upload-image";
+
+const char* gatewayAddress = "http://192.168.11.168:3000/register";
+const char* gatewayUploadUrl = "http://192.168.11.168:3000/upload-image";
+
+#define PIN_PIR 2
+
+// --- Web Server ---
 
 WebServer server(80);
 
@@ -38,6 +45,7 @@ unsigned long lastAdvertTime = 0;
 const long advertIntervalUnregistered = 5000; // 5 seconds
 const long advertIntervalRegistered = 30000;   // 30 seconds
 volatile bool takeAndSendPhoto = false; // Flag to trigger async photo capture and send
+volatile bool motionDetected = false; // Flag for motion detection
 
 void advertiseDevice() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -105,6 +113,10 @@ void captureAndPushImage() {
   HTTPClient http;
   http.begin(gatewayUploadUrl);
   http.addHeader("Content-Type", "image/jpeg");
+  if (motionDetected) {
+    http.addHeader("X-Motion-Detected", "true");
+    motionDetected = false; // Reset the flag after adding the header
+  }
 
   Serial.printf("Pushing image to gateway, size: %zu bytes\n", fb->len);
   int httpResponseCode = http.POST(fb->buf, fb->len);
@@ -136,6 +148,15 @@ void handleTriggerPhoto() {
   server.send(202, "text/plain", "Accepted: Photo capture triggered.");
   takeAndSendPhoto = true;
   Serial.println("Received trigger request. Will capture and send photo shortly.");
+}
+
+void handleMotionDetected() {
+  if(digitalRead(PIN_PIR)==LOW) {
+    takeAndSendPhoto = true;
+    motionDetected = true;
+    Serial.println("Motion detected! Photo capture will be triggered.");
+  }
+
 }
 
 void setup() {
@@ -172,7 +193,7 @@ void setup() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   
-  config.frame_size = FRAMESIZE_UXGA;
+  config.frame_size = FRAMESIZE_SVGA;
   config.jpeg_quality = 10;
   config.fb_count = 2;
 
@@ -187,6 +208,8 @@ void setup() {
   server.on("/trigger-photo", handleTriggerPhoto); // Changed from /takephoto
   server.begin();
   Serial.println("HTTP server started");
+  pinMode(PIN_PIR, INPUT);
+  attachInterrupt(digitalPinToInterrupt(PIN_PIR), handleMotionDetected, FALLING);
 }
 
 void loop() {
